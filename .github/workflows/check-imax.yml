@@ -11,15 +11,15 @@ jobs:
 
     steps:
       - name: Check IMAX page
-        run: |
-          page=$(curl -s https://imaxmelbourne.com.au/sessions | tr '[:upper:]' '[:lower:]')
+       - name: Test Telegram alert
+  run: |
+    page=$(curl -s https://imaxmelbourne.com.au/session_times_and_tickets | tr '[:upper:]' '[:lower:]')
 
-          # MOVIE DETECTION
-        if echo "$page" | grep -E "imax"; then
-            curl -s -X POST "https://api.telegram.org/bot${{ secrets.BOT_TOKEN }}/sendMessage" \
-              -d chat_id=${{ secrets.CHAT_ID }} \
-              -d text="🎬 MOVIE DETECTED at IMAX: https://imaxmelbourne.com.au/sessions"
-          fi
+    if echo "$page" | grep -q "imax"; then
+      curl -s -X POST "https://api.telegram.org/bot${{ secrets.BOT_TOKEN }}/sendMessage" \
+        -d chat_id=${{ secrets.CHAT_ID }} \
+        -d text="✅ TEST ALERT WORKING"
+    fi
 
           # TICKET DETECTION (stronger signal)
           if echo "$page" | grep -E "dune: part three|the odyssey" | grep -E "ticket|session|book"; then
