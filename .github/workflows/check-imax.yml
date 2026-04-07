@@ -15,7 +15,7 @@ jobs:
           page=$(curl -s https://imaxmelbourne.com.au/session_times_and_tickets | tr '[:upper:]' '[:lower:]')
 
           # 🎬 MOVIE DETECTED (early warning)
-          if echo "$page" | grep -q "imax"; then
+          if echo "$page" | grep -q "dune: part three\|the odyssey"; then
             if [ ! -f movie_seen.txt ]; then
               echo "seen" > movie_seen.txt
 
