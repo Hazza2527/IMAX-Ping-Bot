@@ -1,0 +1,21 @@
+name: Queue-It Detector
+
+on:
+  schedule:
+    - cron: "* * * * *"
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check for Queue-It activation
+        run: |
+          page=$(curl -s https://imaxmelbourne.com.au/session_times_and_tickets | tr '[:upper:]' '[:lower:]')
+
+          if echo "$page" | grep -q "queue-it\|queueit"; then
+            curl -s -X POST "https://api.telegram.org/bot${{ secrets.BOT_TOKEN }}/sendMessage" \
+              -d chat_id=${{ secrets.CHAT_ID }} \
+              -d text="🚨 QUEUE-IT DETECTED → Join immediately: https://imaxmelbourne.com.au/session_times_and_tickets"
+          fi
