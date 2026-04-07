@@ -10,12 +10,28 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Test Telegram alert
+      - name: Check IMAX tickets page
         run: |
           page=$(curl -s https://imaxmelbourne.com.au/session_times_and_tickets | tr '[:upper:]' '[:lower:]')
 
-          if echo "$page" | grep -q "imax"; then
-            curl -s -X POST "https://api.telegram.org/bot${{ secrets.BOT_TOKEN }}/sendMessage" \
-              -d chat_id=${{ secrets.CHAT_ID }} \
-              -d text="✅ TEST ALERT WORKING"
+          # 🎬 MOVIE DETECTED (early warning)
+          if echo "$page" | grep -q "dune: part three\|the odyssey"; then
+            if [ ! -f movie_seen.txt ]; then
+              echo "seen" > movie_seen.txt
+
+              curl -s -X POST "https://api.telegram.org/bot${{ secrets.BOT_TOKEN }}/sendMessage" \
+                -d chat_id=${{ secrets.CHAT_ID }} \
+                -d text="🎬 IMAX: Movie detected (Dune 3 / Odyssey) → https://imaxmelbourne.com.au/session_times_and_tickets"
+            fi
+          fi
+
+          # 🚨 70MM / TICKETS LIVE (what you REALLY want)
+          if echo "$page" | grep -q "dune: part three.*70mm\|the odyssey.*70mm"; then
+            if [ ! -f tickets_seen.txt ]; then
+              echo "tickets" > tickets_seen.txt
+
+              curl -s -X POST "https://api.telegram.org/bot${{ secrets.BOT_TOKEN }}/sendMessage" \
+                -d chat_id=${{ secrets.CHAT_ID }} \
+                -d text="🚨 IMAX 70MM TICKETS LIVE → https://imaxmelbourne.com.au/session_times_and_tickets"
+            fi
           fi
