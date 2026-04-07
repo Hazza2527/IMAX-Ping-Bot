@@ -2,27 +2,20 @@ name: IMAX Alert
 
 on:
   schedule:
-    - cron: "* * * * *"  # every minute
+    - cron: "* * * * *"
   workflow_dispatch:
 
 jobs:
   check:
     runs-on: ubuntu-latest
 
-   steps:
-  - name: Test Telegram alert
-    run: |
-      page=$(curl -s https://imaxmelbourne.com.au/session_times_and_tickets | tr '[:upper:]' '[:lower:]')
+    steps:
+      - name: Test Telegram alert
+        run: |
+          page=$(curl -s https://imaxmelbourne.com.au/session_times_and_tickets | tr '[:upper:]' '[:lower:]')
 
-      if echo "$page" | grep -q "imax"; then
-        curl -s -X POST "https://api.telegram.org/bot${{ secrets.BOT_TOKEN }}/sendMessage" \
-          -d chat_id=${{ secrets.CHAT_ID }} \
-          -d text="✅ TEST ALERT WORKING"
-      fi
-
-          # TICKET DETECTION (stronger signal)
-          if echo "$page" | grep -E "dune: part three|the odyssey" | grep -E "ticket|session|book"; then
+          if echo "$page" | grep -q "imax"; then
             curl -s -X POST "https://api.telegram.org/bot${{ secrets.BOT_TOKEN }}/sendMessage" \
               -d chat_id=${{ secrets.CHAT_ID }} \
-              -d text="🚨 TICKETS LIKELY LIVE: https://imaxmelbourne.com.au/sessions"
+              -d text="✅ TEST ALERT WORKING"
           fi
