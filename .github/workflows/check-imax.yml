@@ -1,4 +1,4 @@
-name: IMAX Alert
+name: IMAX Real Session Alert
 
 on:
   schedule:
@@ -10,22 +10,30 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check IMAX tickets page
+      - name: Check for real IMAX sessions
         run: |
-          page=$(curl -s https://imaxmelbourne.com.au/session_times_and_tickets | tr '[:upper:]' '[:lower:]')
+          # Fetch page
+          page=$(curl -s https://imaxmelbourne.com.au/session_times_and_tickets)
 
-          # Extract only lines containing target movies
-          matches=$(echo "$page" | grep -iE "dune: part three|the odyssey")
+          # Normalize
+          lower_page=$(echo "$page" | tr '[:upper:]' '[:lower:]')
 
-          # 🚨 70MM ALERT (must be in SAME line)
-          if echo "$matches" | grep -q "70mm"; then
-            curl -s -X POST "https://api.telegram.org/bot${{ secrets.BOT_TOKEN }}/sendMessage" \
-              -d chat_id=${{ secrets.CHAT_ID }} \
-              -d text="🚨 IMAX 70MM TICKETS LIVE → https://imaxmelbourne.com.au/session_times_and_tickets"
+          # Only continue if your movies exist
+          if echo "$lower_page" | grep -qiE "dune: part three|the odyssey"; then
 
-          # 🎬 Movie detected only (no 70mm yet)
-          elif [ -n "$matches" ]; then
-            curl -s -X POST "https://api.telegram.org/bot${{ secrets.BOT_TOKEN }}/sendMessage" \
-              -d chat_id=${{ secrets.CHAT_ID }} \
-              -d text="🎬 IMAX: Movie detected → https://imaxmelbourne.com.au/session_times_and_tickets"
+            # Extract ONLY real booking links (session-based)
+            links=$(echo "$page" | grep -o 'https://ticketing.imaxmelbourne.com.au[^"]*visSelectTickets.aspx[^"]*txtSessionId=[0-9]*' | sort -u)
+
+            if [ -n "$links" ]; then
+
+              # Send each link separately
+              echo "$links" | while read link; do
+
+                curl -s -X POST "https://api.telegram.org/bot${{ secrets.BOT_TOKEN }}/sendMessage" \
+                  -d chat_id=${{ secrets.CHAT_ID }} \
+                  -d text="🎬 IMAX SESSION LIVE → $link"
+
+              done
+
+            fi
           fi
