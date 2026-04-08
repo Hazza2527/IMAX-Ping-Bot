@@ -14,24 +14,18 @@ jobs:
         run: |
           page=$(curl -s https://imaxmelbourne.com.au/session_times_and_tickets | tr '[:upper:]' '[:lower:]')
 
-          # 🎬 MOVIE DETECTED (early warning)
-          if echo "$page" | grep -q "dune: part three\|the odyssey"; then
-            if [ ! -f movie_seen.txt ]; then
-              echo "seen" > movie_seen.txt
+          # Extract only lines containing target movies
+          matches=$(echo "$page" | grep -iE "dune: part three|the odyssey")
 
-              curl -s -X POST "https://api.telegram.org/bot${{ secrets.BOT_TOKEN }}/sendMessage" \
-                -d chat_id=${{ secrets.CHAT_ID }} \
-                -d text="🎬 IMAX: Movie detected (Dune 3 / Odyssey) → https://imaxmelbourne.com.au/session_times_and_tickets"
-            fi
-          fi
+          # 🚨 70MM ALERT (must be in SAME line)
+          if echo "$matches" | grep -q "70mm"; then
+            curl -s -X POST "https://api.telegram.org/bot${{ secrets.BOT_TOKEN }}/sendMessage" \
+              -d chat_id=${{ secrets.CHAT_ID }} \
+              -d text="🚨 IMAX 70MM TICKETS LIVE → https://imaxmelbourne.com.au/session_times_and_tickets"
 
-          # 🚨 70MM / TICKETS LIVE (what you REALLY want)
-          if echo "$page" | grep -q "dune: part three.*70mm\|the odyssey.*70mm"; then
-            if [ ! -f tickets_seen.txt ]; then
-              echo "tickets" > tickets_seen.txt
-
-              curl -s -X POST "https://api.telegram.org/bot${{ secrets.BOT_TOKEN }}/sendMessage" \
-                -d chat_id=${{ secrets.CHAT_ID }} \
-                -d text="🚨 IMAX 70MM TICKETS LIVE → https://imaxmelbourne.com.au/session_times_and_tickets"
-            fi
+          # 🎬 Movie detected only (no 70mm yet)
+          elif [ -n "$matches" ]; then
+            curl -s -X POST "https://api.telegram.org/bot${{ secrets.BOT_TOKEN }}/sendMessage" \
+              -d chat_id=${{ secrets.CHAT_ID }} \
+              -d text="🎬 IMAX: Movie detected → https://imaxmelbourne.com.au/session_times_and_tickets"
           fi
