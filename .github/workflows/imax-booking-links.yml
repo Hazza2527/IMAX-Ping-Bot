@@ -1,37 +1,153 @@
-name: IMAX Booking Link Alert
+name: IMAX Booking Link Alert (Hardened)
 
 on:
   schedule:
     - cron: "* * * * *"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   check:
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
     steps:
-      - name: Check for IMAX booking links
+      - name: Restore prior booking-link state
+        uses: actions/cache/restore@v5
+        with:
+          path: .state/imax_booking_links_state.json
+          key: imax-booking-links-state-${{ github.run_id }}
+          restore-keys: |
+            imax-booking-links-state-
+
+      - name: Check for real IMAX booking links (no gift-card false positives)
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
         run: |
-          # Fetch page
-          page=$(curl -s https://imaxmelbourne.com.au/session_times_and_tickets)
+          set -euo pipefail
+          mkdir -p .state
 
-          # Extract ALL ticketing links (unique only)
-          links=$(echo "$page" | grep -o 'https://ticketing.imaxmelbourne.com.au[^"]*' | sort -u)
+          python3 <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          from html import unescape
+          from urllib.parse import parse_qs, urlparse
 
-          # Only proceed if links exist
-          if [ -n "$links" ]; then
+          STATE_PATH = '.state/imax_booking_links_state.json'
+          SESSION_PAGE = 'https://imaxmelbourne.com.au/session_times_and_tickets'
+          BASE_MOVIE_IDS = {'926', '714'}
 
-            # Check for your target movies
-            if echo "$page" | grep -qiE "dune: part three|the odyssey"; then
+          def fetch(url: str) -> str:
+              return subprocess.check_output([
+                  'curl', '-fsSL',
+                  '--retry', '3',
+                  '--retry-delay', '2',
+                  '--max-time', '30',
+                  url,
+              ], text=True)
 
-              # Loop through each link and send individually
-              echo "$links" | while read link; do
+          def norm_text(text: str) -> str:
+              return re.sub(r'\s+', ' ', unescape(text)).strip()
 
-                curl -s -X POST "https://api.telegram.org/bot${{ secrets.BOT_TOKEN }}/sendMessage" \
-                  -d chat_id=${{ secrets.CHAT_ID }} \
-                  -d text="🎟️ IMAX TICKETS LIVE → $link"
+          def canonical_target(title: str):
+              up = re.sub(r'[^A-Z0-9]+', ' ', title.upper()).strip()
+              if 'DUNE' in up and ('PART THREE' in up or 'PART 3' in up):
+                  return True
+              if 'ODYSSEY' in up:
+                  return True
+              return False
 
-              done
+          def discover_target_movie_ids():
+              html = fetch(SESSION_PAGE)
+              ids = set(BASE_MOVIE_IDS)
+              for m in re.finditer(r'<option\s+value="(\d+)"[^>]*>(.*?)</option>', html, flags=re.I | re.S):
+                  movie_id = m.group(1).strip()
+                  title = norm_text(m.group(2))
+                  if canonical_target(title):
+                      ids.add(movie_id)
+              return sorted(ids)
 
-            fi
+          def extract_live_links(movie_id: str):
+              html = fetch(f'https://imaxmelbourne.com.au/html/movie_sessions/{movie_id}')
+              li_blocks = re.findall(r'<li\b[^>]*>.*?</li>', html, flags=re.I | re.S)
+
+              out = []
+              for block in li_blocks:
+                  movie_match = re.search(r'<a[^>]*class="[^"]*movie[^"]*"[^>]*>(.*?)</a>', block, flags=re.I | re.S)
+                  movie_title = norm_text(movie_match.group(1)) if movie_match else ''
+                  if not canonical_target(movie_title):
+                      continue
+
+                  time_match = re.search(r'<span[^>]*class="[^"]*time[^"]*"[^>]*>(.*?)</span>', block, flags=re.I | re.S)
+                  session_time = norm_text(time_match.group(1)) if time_match else 'Unknown time'
+
+                  raw_links = re.findall(r'href="(https://ticketing\.imaxmelbourne\.com\.au/Ticketing/visSelectTickets\.aspx[^"]+)"', block, flags=re.I)
+
+                  for raw in raw_links:
+                      link = unescape(raw)
+                      qs = parse_qs(urlparse(link).query)
+                      sid = (qs.get('txtSessionId') or [''])[0].strip()
+                      if not sid:
+                          continue
+                      out.append((sid, movie_title, session_time, link))
+
+              dedup = {}
+              for sid, title, tm, link in out:
+                  dedup[sid] = (title, tm, link)
+              return dedup
+
+          previous = {'seen_session_ids': []}
+          if os.path.exists(STATE_PATH):
+              try:
+                  with open(STATE_PATH, 'r', encoding='utf-8') as f:
+                      previous = json.load(f)
+              except Exception:
+                  previous = {'seen_session_ids': []}
+
+          seen = set(previous.get('seen_session_ids', []))
+          movie_ids = discover_target_movie_ids()
+
+          live = {}
+          for mid in movie_ids:
+              live.update(extract_live_links(mid))
+
+          alerts = []
+          for sid, (title, tm, link) in sorted(live.items()):
+              if sid not in seen:
+                  alerts.append(f"🎟️ IMAX TICKETS LIVE: {title} at {tm} — {link}")
+
+          with open(STATE_PATH, 'w', encoding='utf-8') as f:
+              json.dump({'seen_session_ids': sorted(live.keys())}, f, indent=2)
+
+          with open('.state/alerts.txt', 'w', encoding='utf-8') as f:
+              for line in alerts:
+                  f.write(line + '\n')
+
+          print(f"Checked movie IDs: {', '.join(movie_ids)}")
+          print(f"Live links now: {len(live)} | new alerts: {len(alerts)}")
+          PY
+
+          if [ ! -s .state/alerts.txt ]; then
+            echo "No new live booking links."
+            exit 0
           fi
+
+          while IFS= read -r msg; do
+            [ -z "$msg" ] && continue
+            curl -fsSL -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${CHAT_ID}" \
+              --data-urlencode "text=${msg}" >/dev/null
+          done < .state/alerts.txt
+
+      - name: Save booking-link state
+        if: always()
+        uses: actions/cache/save@v5
+        with:
+          path: .state/imax_booking_links_state.json
+          key: imax-booking-links-state-${{ github.run_id }}
