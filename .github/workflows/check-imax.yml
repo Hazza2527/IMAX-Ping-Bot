@@ -1,41 +1,194 @@
-name: IMAX Real Session Alert (Hardened)
+name: check-imax (Hardened)
 
 on:
   schedule:
     - cron: "* * * * *"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   check:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Check for real IMAX sessions
+      - name: Restore prior state
+        id: restore_state
+        uses: actions/cache/restore@v4
+        with:
+          path: .state/imax_sessions_state.json
+          key: imax-session-state-${{ github.run_id }}
+          restore-keys: |
+            imax-session-state-
+
+      - name: Detect new sessions and ticket activation (Dune/Odyssey)
+        id: detect
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          TZ: Australia/Melbourne
         run: |
-          # Fetch page
-          page=$(curl -s https://imaxmelbourne.com.au/session_times_and_tickets)
+          set -euo pipefail
+          mkdir -p .state
 
-          # Normalize
-          lower=$(echo "$page" | tr '[:upper:]' '[:lower:]')
+          python3 <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          from datetime import datetime, timezone
+          from html import unescape
+          from urllib.parse import parse_qs, urlparse
 
-          # Only continue if your movies are present
-          if echo "$lower" | grep -qiE "dune: part three|the odyssey"; then
+          STATE_PATH = '.state/imax_sessions_state.json'
+          SESSION_PAGE = 'https://imaxmelbourne.com.au/session_times_and_tickets'
+          BASE_MOVIE_IDS = {'926', '714'}
 
-            # Extract STRICT session links only
-            links=$(echo "$page" \
-              | grep -o 'https://ticketing.imaxmelbourne.com.au[^"]*' \
-              | grep 'visSelectTickets.aspx' \
-              | grep 'txtSessionId=' \
-              | grep -v 'visShop.aspx' \
-              | sort -u)
+          def run(cmd):
+              return subprocess.check_output(cmd, text=True)
 
-            if [ -n "$links" ]; then
+          def fetch(url: str) -> str:
+              return run([
+                  'curl', '-fsSL',
+                  '--retry', '3',
+                  '--retry-delay', '2',
+                  '--max-time', '30',
+                  url,
+              ])
 
-              echo "$links" | while read link; do
-                curl -s -X POST "https://api.telegram.org/bot${{ secrets.BOT_TOKEN }}/sendMessage" \
-                  -d chat_id=${{ secrets.CHAT_ID }} \
-                  -d text="🎬 IMAX SESSION LIVE → $link"
-              done
+          def norm_text(text: str) -> str:
+              return re.sub(r'\s+', ' ', unescape(text)).strip()
 
-            fi
+          def canonical_target(title: str):
+              up = re.sub(r'[^A-Z0-9]+', ' ', title.upper()).strip()
+              if 'DUNE' in up and ('PART THREE' in up or 'PART 3' in up):
+                  return 'DUNE: PART THREE'
+              if 'ODYSSEY' in up:
+                  return 'THE ODYSSEY'
+              return None
+
+          def discover_target_movie_ids():
+              html = fetch(SESSION_PAGE)
+              ids = set(BASE_MOVIE_IDS)
+
+              for m in re.finditer(r'<option\s+value="(\d+)"[^>]*>(.*?)</option>', html, flags=re.I | re.S):
+                  movie_id = m.group(1).strip()
+                  title = norm_text(m.group(2))
+                  if canonical_target(title):
+                      ids.add(movie_id)
+
+              return sorted(ids)
+
+          def extract_sessions(movie_id: str):
+              url = f'https://imaxmelbourne.com.au/html/movie_sessions/{movie_id}'
+              html = fetch(url)
+
+              li_blocks = re.findall(r'<li\b[^>]*>.*?</li>', html, flags=re.I | re.S)
+              sessions = {}
+
+              for block in li_blocks:
+                  time_match = re.search(r'<span[^>]*class="[^"]*time[^"]*"[^>]*>(.*?)</span>', block, flags=re.I | re.S)
+                  if not time_match:
+                      continue
+                  session_time = norm_text(time_match.group(1))
+
+                  movie_match = re.search(r'<a[^>]*class="[^"]*movie[^"]*"[^>]*>(.*?)</a>', block, flags=re.I | re.S)
+                  movie_title = norm_text(movie_match.group(1)) if movie_match else ''
+                  target_family = canonical_target(movie_title)
+                  if not target_family:
+                      continue
+
+                  raw_links = re.findall(r'href="(https://ticketing\.imaxmelbourne\.com\.au/Ticketing/visSelectTickets\.aspx[^"]+)"', block, flags=re.I)
+                  links = []
+                  session_ids = set()
+                  for raw in raw_links:
+                      clean = unescape(raw)
+                      parsed = urlparse(clean)
+                      qs = parse_qs(parsed.query)
+                      sid = (qs.get('txtSessionId') or [''])[0].strip()
+                      if not sid:
+                          continue
+                      links.append(clean)
+                      session_ids.add(sid)
+
+                  status = 'live' if links else 'listed'
+                  primary_sid = sorted(session_ids)[0] if session_ids else ''
+
+                  key = primary_sid if primary_sid else f"{movie_id}|{session_time}|{movie_title.upper()}"
+                  sessions[key] = {
+                      'movie_id': movie_id,
+                      'target_family': target_family,
+                      'movie_title': movie_title,
+                      'time': session_time,
+                      'status': status,
+                      'session_id': primary_sid,
+                      'links': sorted(set(links)),
+                  }
+
+              return sessions
+
+          previous = {'generated_at_utc': '', 'sessions': {}}
+          if os.path.exists(STATE_PATH):
+              try:
+                  with open(STATE_PATH, 'r', encoding='utf-8') as f:
+                      previous = json.load(f)
+              except Exception:
+                  previous = {'generated_at_utc': '', 'sessions': {}}
+
+          prev_sessions = previous.get('sessions', {})
+          current_sessions = {}
+          movie_ids = discover_target_movie_ids()
+
+          for mid in movie_ids:
+              current_sessions.update(extract_sessions(mid))
+
+          alerts = []
+          for key, cur in sorted(current_sessions.items()):
+              prev = prev_sessions.get(key)
+              label = f"{cur['target_family']} ({cur['movie_title']})"
+
+              if prev is None:
+                  if cur['status'] == 'live' and cur['links']:
+                      alerts.append(f"🎟️ NEW + LIVE: {label} at {cur['time']} — {cur['links'][0]}")
+                  else:
+                      alerts.append(f"🆕 NEW SESSION: {label} at {cur['time']} (not on sale yet)")
+                  continue
+
+              if prev.get('status') != 'live' and cur['status'] == 'live' and cur['links']:
+                  alerts.append(f"🚨 TICKETS LIVE: {label} at {cur['time']} — {cur['links'][0]}")
+
+          state = {
+              'generated_at_utc': datetime.now(timezone.utc).isoformat(),
+              'movie_ids_checked': movie_ids,
+              'sessions': current_sessions,
+          }
+          with open(STATE_PATH, 'w', encoding='utf-8') as f:
+              json.dump(state, f, ensure_ascii=False, indent=2, sort_keys=True)
+
+          out_path = '.state/alerts.txt'
+          with open(out_path, 'w', encoding='utf-8') as f:
+              for line in alerts:
+                  f.write(line + '\n')
+
+          print(f"Checked movie IDs: {', '.join(movie_ids)}")
+          print(f"Detected {len(current_sessions)} target sessions; generated {len(alerts)} alert(s).")
+          PY
+
+          if [ ! -s .state/alerts.txt ]; then
+            echo "No new alerts."
+            exit 0
           fi
+
+          while IFS= read -r msg; do
+            [ -z "$msg" ] && continue
+            curl -fsSL -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${CHAT_ID}" \
+              --data-urlencode "text=${msg}" >/dev/null
+          done < .state/alerts.txt
+
+      - name: Save updated state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .state/imax_sessions_state.json
+          key: imax-session-state-${{ github.run_id }}
