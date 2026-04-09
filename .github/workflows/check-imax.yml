@@ -1,4 +1,4 @@
-name: IMAX Real Session Alert (Strict)
+name: IMAX Real Session Alert (Hardened)
 
 on:
   schedule:
@@ -18,23 +18,24 @@ jobs:
           # Normalize
           lower=$(echo "$page" | tr '[:upper:]' '[:lower:]')
 
-          # Split page into blocks (roughly by movie sections)
-          echo "$lower" | awk '
-            BEGIN { RS="</section>"; IGNORECASE=1 }
-            /dune: part three|the odyssey/ {
-              print
-            }
-          ' > movie_blocks.txt
+          # Only continue if your movies are present
+          if echo "$lower" | grep -qiE "dune: part three|the odyssey"; then
 
-          # Extract ONLY valid session links from those blocks
-          links=$(grep -o 'https://ticketing.imaxmelbourne.com.au[^"]*visSelectTickets.aspx[^"]*txtsessionid=[0-9]*' movie_blocks.txt | sort -u)
+            # Extract STRICT session links only
+            links=$(echo "$page" \
+              | grep -o 'https://ticketing.imaxmelbourne.com.au[^"]*' \
+              | grep 'visSelectTickets.aspx' \
+              | grep 'txtSessionId=' \
+              | grep -v 'visShop.aspx' \
+              | sort -u)
 
-          if [ -n "$links" ]; then
+            if [ -n "$links" ]; then
 
-            echo "$links" | while read link; do
-              curl -s -X POST "https://api.telegram.org/bot${{ secrets.BOT_TOKEN }}/sendMessage" \
-                -d chat_id=${{ secrets.CHAT_ID }} \
-                -d text="🎬 IMAX SESSION LIVE → $link"
-            done
+              echo "$links" | while read link; do
+                curl -s -X POST "https://api.telegram.org/bot${{ secrets.BOT_TOKEN }}/sendMessage" \
+                  -d chat_id=${{ secrets.CHAT_ID }} \
+                  -d text="🎬 IMAX SESSION LIVE → $link"
+              done
 
+            fi
           fi
